@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: ml-inference
+  labels:
+    app.kubernetes.io/part-of: distributed-ml-inference
+data:
+  init.sql: |
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'replicator') THEN
+            CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'repl123';
+        END IF;
+    END
+    $$;
+
+    CREATE TABLE IF NOT EXISTS mahasiswa (
+        id SERIAL PRIMARY KEY,
+        nama TEXT NOT NULL,
+        jurusan TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inference_results (
+        id BIGSERIAL PRIMARY KEY,
+        sepal_length DOUBLE PRECISION NOT NULL,
+        sepal_width DOUBLE PRECISION NOT NULL,
+        petal_length DOUBLE PRECISION NOT NULL,
+        petal_width DOUBLE PRECISION NOT NULL,
+        prediction TEXT NOT NULL,
+        confidence DOUBLE PRECISION NOT NULL,
+        subject TEXT,
+        model_name TEXT NOT NULL DEFAULT 'Random Forest',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    INSERT INTO mahasiswa (nama, jurusan) VALUES
+        ('Andi Pratama', 'Teknik Informatika'),
+        ('Citra Lestari', 'Sistem Informasi'),
+        ('Dewi Anggraini', 'Teknik Informatika'),
+        ('Eko Nugroho', 'Sistem Informasi'),
+        ('Fajar Ramadhan', 'Teknik Komputer'),
+        ('Gita Permata', 'Teknik Informatika');
+  pg_hba.conf: |
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32            trust
+    host    all             all             ::1/128                 trust
+    host    all             all             all                     scram-sha-256
+    local   replication     all                                     trust
+    host    replication     all             127.0.0.1/32            trust
+    host    replication     all             ::1/128                 trust
+    host    replication     all             all                     scram-sha-256
+  replica-entrypoint.sh: |
+    #!/bin/bash
+    set -e
+
+    : "${PRIMARY_HOST:=postgres-primary}"
+    : "${PRIMARY_PORT:=5432}"
+    : "${REPLICATION_USER:=replicator}"
+    : "${PGDATA:=/var/lib/postgresql/data}"
+
+    until pg_isready -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "${POSTGRES_USER:-admin}"; do
+      echo "Menunggu PostgreSQL Primary siap..."
+      sleep 2
+    done
+
+    if [ ! -s "$PGDATA/PG_VERSION" ]; then
+      echo "Data replica kosong, menjalankan pg_basebackup dari $PRIMARY_HOST..."
+      find "$PGDATA" -mindepth 1 -delete 2>/dev/null || true
+      chown -R postgres:postgres "$PGDATA"
+      gosu postgres pg_basebackup \
+        -h "$PRIMARY_HOST" \
+        -p "$PRIMARY_PORT" \
+        -D "$PGDATA" \
+        -U "$REPLICATION_USER" \
+        -Fp -Xs -P -R -w
+    fi
+
+    chown -R postgres:postgres "$PGDATA"
+    exec gosu postgres postgres
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: ml-inference
+  labels:
+    app.kubernetes.io/part-of: distributed-ml-inference
+data:
+  DB_PRIMARY_HOST: postgres-primary
+  DB_PRIMARY_PORT: "5432"
+  DB_REPLICA_HOST: postgres-replica
+  DB_REPLICA_PORT: "5432"
+  KEYCLOAK_ISSUER: http://localhost:8080/realms/ml-inference
+  KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/ml-inference/protocol/openid-connect/certs
+  KEYCLOAK_AUDIENCE: ml-backend
+  KEYCLOAK_REQUIRED_ROLE: user
+  AUTO_INIT_DB: "true"

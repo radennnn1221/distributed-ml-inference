@@ -1,0 +1,71 @@
+# ============================================================
+# Storage statis (PV) + StorageClass untuk cluster lokal
+# (kind / minikube single-node). Data disimpan di hostPath node.
+#
+# Jika cluster sudah punya StorageClass dinamis (mis. standard),
+# file ini boleh dilewati dan hapus field storageClassName/selector
+# pada volumeClaimTemplates.
+# ============================================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ml-local-storage
+  labels:
+    app.kubernetes.io/part-of: distributed-ml-inference
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-postgres-primary
+  labels:
+    app: postgres-primary
+    app.kubernetes.io/part-of: distributed-ml-inference
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ml-local-storage
+  hostPath:
+    path: /tmp/ml-k8s/postgres-primary
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-postgres-replica
+  labels:
+    app: postgres-replica
+    app.kubernetes.io/part-of: distributed-ml-inference
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ml-local-storage
+  hostPath:
+    path: /tmp/ml-k8s/postgres-replica
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-keycloak-db
+  labels:
+    app: keycloak-db
+    app.kubernetes.io/part-of: distributed-ml-inference
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ml-local-storage
+  hostPath:
+    path: /tmp/ml-k8s/keycloak-db
+    type: DirectoryOrCreate

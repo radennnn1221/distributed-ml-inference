@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica-headless
+  namespace: ml-inference
+  labels:
+    app: postgres-replica
+spec:
+  clusterIP: None
+  selector:
+    app: postgres-replica
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: ml-inference
+  labels:
+    app: postgres-replica
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres-replica
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-replica
+  namespace: ml-inference
+  labels:
+    app: postgres-replica
+spec:
+  serviceName: postgres-replica-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-replica
+  template:
+    metadata:
+      labels:
+        app: postgres-replica
+    spec:
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - chown -R 999:999 /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - /scripts/replica-entrypoint.sh
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: PRIMARY_HOST
+              value: postgres-primary
+            - name: PRIMARY_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: REPLICATION_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: replica-script
+              mountPath: /scripts/replica-entrypoint.sh
+              subPath: replica-entrypoint.sh
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 40
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: replica-script
+          configMap:
+            name: postgres-config
+            items:
+              - key: replica-entrypoint.sh
+                path: replica-entrypoint.sh
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: postgres-replica
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: ml-local-storage
+        resources:
+          requests:
+            storage: 2Gi
+        selector:
+          matchLabels:
+            app: postgres-replica

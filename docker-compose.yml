@@ -1,0 +1,162 @@
+name: distributed-ml-inference
+
+services:
+  # ==========================================================
+  # PostgreSQL Primary (menerima operasi tulis)
+  # ==========================================================
+  postgres-primary:
+    image: postgres:16
+    container_name: postgres-primary
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      POSTGRES_DB: ${POSTGRES_DB:-ml_database}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_primary_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - ./database/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - listen_addresses=*
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-ml_database}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ml-network
+
+  # ==========================================================
+  # PostgreSQL Read Replica (melayani operasi baca)
+  # ==========================================================
+  postgres-replica:
+    image: postgres:16
+    container_name: postgres-replica
+    restart: unless-stopped
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${REPLICATION_PASSWORD:-repl123}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./database/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/scripts/replica-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-ml_database}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ml-network
+
+  # ==========================================================
+  # Database khusus Keycloak (dipisah dari database aplikasi)
+  # ==========================================================
+  keycloak-db:
+    image: postgres:16
+    container_name: keycloak-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak123}
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ml-network
+
+  # ==========================================================
+  # Keycloak - Identity Provider (OIDC / OAuth2)
+  # ==========================================================
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak123}
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-ml-inference.json:/opt/keycloak/data/import/realm-ml-inference.json:ro
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks:
+      - ml-network
+
+  # ==========================================================
+  # FastAPI Backend (validasi JWT mandiri + inferensi ML)
+  # ==========================================================
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: distributed-ml-inference/backend:2.0.0
+    container_name: ml-backend
+    restart: unless-stopped
+    environment:
+      DB_PRIMARY_HOST: postgres-primary
+      DB_PRIMARY_PORT: "5432"
+      DB_REPLICA_HOST: postgres-replica
+      DB_REPLICA_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-ml_database}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8080/realms/ml-inference}
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/ml-inference/protocol/openid-connect/certs
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-ml-backend}
+      KEYCLOAK_REQUIRED_ROLE: ${KEYCLOAK_REQUIRED_ROLE:-user}
+      AUTO_INIT_DB: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - ml-network
+
+volumes:
+  postgres_primary_data:
+  postgres_replica_data:
+  keycloak_db_data:
+
+networks:
+  ml-network:
+    driver: bridge

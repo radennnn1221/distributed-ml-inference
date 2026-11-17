@@ -1,0 +1,16 @@
+.git
+.gitignore
+.gitattributes
+venv
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+*.docx
+README.md
+.env
+.env.*
+kubernetes
+keycloak
+database
